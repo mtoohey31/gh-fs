@@ -20,9 +20,6 @@ import (
 	"github.com/cli/go-gh/pkg/api"
 )
 
-// TODO: set validity times based on http response info, api caching
-// documentation, or something...
-
 // TODO: allow write access to the authenticated user's directory? This could be
 // dangerous; it should probably be disabled by default with a flag to enable
 // it. We can't provide write access to files inside repositories, but we could
@@ -41,7 +38,9 @@ func main() {
 
 	var err error
 
-	client, err = gh.RESTClient(nil)
+	// TODO: investigate whether manually caching would be better, and how this
+	// caching actually works, cause it might not be doing what we want it to
+	client, err = gh.RESTClient(&api.ClientOptions{EnableCache: true})
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -152,11 +151,6 @@ func (u *User) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 // A user directory contains that user's repositories.
 func (u *User) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	// TODO: listing a user directory seems to take longer than it should, but
-	// it looks like lookups are happening => requests are being made for each
-	// individual directory. This requires further investigation, and might only
-	// be resolvable through internal caching.
-
 	var e []fuse.Dirent
 	v := url.Values{}
 	v.Set("per_page", "100")
