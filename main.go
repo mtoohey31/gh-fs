@@ -107,9 +107,48 @@ func (Root) Lookup(ctx context.Context, name string) (fs.Node, error) {
 }
 
 // Root conceptually contains all users, but we can't actually display that, so
-// we provide nothing.
+// instead we display the users followed by the authenticated user, and the
+// authenticated user themself. This means those will be the only visible
+// folders, but all other users can still be accessed via looking.
 func (Root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	return []fuse.Dirent{}, nil
+	var res *User
+	err := client.Get("user", &res)
+	if err != nil {
+		return nil, err
+	}
+
+	if res == nil {
+		return nil, errors.New("TODO")
+	}
+
+	// TODO: include owners of repos the current user has starred too
+	e := []fuse.Dirent{{Inode: res.Id, Type: fuse.DT_Dir, Name: res.Login}}
+	v := url.Values{}
+	v.Set("per_page", "100")
+
+	for i := 1; true; i++ {
+		var res []*User
+
+		v.Set("page", strconv.Itoa(i))
+		err := client.Get(fmt.Sprintf("user/following?%s", v.Encode()), &res)
+
+		if err != nil {
+			return []fuse.Dirent{}, err
+		}
+
+		if len(res) == 0 {
+			break
+		}
+
+		ne := make([]fuse.Dirent, len(res))
+		for i, u := range res {
+			ne[i] = fuse.Dirent{Inode: u.Id, Type: fuse.DT_Dir, Name: u.Login}
+		}
+
+		e = append(e, ne...)
+	}
+
+	return e, nil
 }
 
 // User implements both Node and Handle for a user directory.
