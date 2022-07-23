@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -151,30 +152,43 @@ func (u *User) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 // A user directory contains that user's repositories.
 func (u *User) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	// TODO: keep looping until we get all repos
-
 	// TODO: listing a user directory seems to take longer than it should, but
 	// it looks like lookups are happening => requests are being made for each
 	// individual directory. This requires further investigation, and might only
 	// be resolvable through internal caching.
 
-	var res []*Repo
-	err := client.Get(fmt.Sprintf("users/%s/repos", url.PathEscape(u.Login)),
-		&res)
-	if err != nil {
-		return []fuse.Dirent{}, err
-	}
+	var e []fuse.Dirent
+	v := url.Values{}
+	v.Set("per_page", "100")
 
-	entries := make([]fuse.Dirent, len(res))
-	for i, r := range res {
-		entries[i] = fuse.Dirent{
-			Inode: r.Id,
-			Type:  fuse.DT_Dir,
-			Name:  r.Name,
+	for i := 1; true; i++ {
+		var res []*Repo
+
+		v.Set("page", strconv.Itoa(i))
+		err := client.Get(fmt.Sprintf("users/%s/repos?%s",
+			url.PathEscape(u.Login), v.Encode()), &res)
+
+		if err != nil {
+			return []fuse.Dirent{}, err
 		}
+
+		if len(res) == 0 {
+			break
+		}
+
+		ne := make([]fuse.Dirent, len(res))
+		for i, r := range res {
+			ne[i] = fuse.Dirent{
+				Inode: r.Id,
+				Type:  fuse.DT_Dir,
+				Name:  r.Name,
+			}
+		}
+
+		e = append(e, ne...)
 	}
 
-	return entries, nil
+	return e, nil
 }
 
 // Repo implements both Node and Handle for a repository directory.
