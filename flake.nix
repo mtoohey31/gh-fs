@@ -29,7 +29,7 @@
           name = "gh-fs";
           pname = name;
           src = ./.;
-          vendorSha256 = "";
+          vendorSha256 = "cZQFfZ8MOfW2Tzd5/Ju+JXJ0rbe56DBoUkvbYf6B0mo=";
         };
 
         devShells.default = mkShell { packages = [ go_1_18 gopls gow ]; };
