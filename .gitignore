@@ -1,6 +1,6 @@
 **.test
 **.out
 
-/result
-/gh-fs
 /dist/
+/gh-fs
+/result
