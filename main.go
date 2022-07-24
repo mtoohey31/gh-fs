@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -61,25 +62,23 @@ func main() {
 	}
 }
 
-// FS implements the github file system. Permissions are set so only the user
-// that this mount belongs to can do anything, so other users don't abuse the
-// logged in user's api access.
+// FS implements fs.FS. Permissions are set so only the user that this mount
+// belongs to can do anything, so other users don't abuse the logged in user's
+// api access.
 type FS struct{}
 
 func (FS) Root() (fs.Node, error) {
 	return Root{}, nil
 }
 
-// Root implements both Node and Handle for the root directory. Since it
-// conceptually contains all users, it can't be read (since that would require
-// listing all ~73 million users (at the time of writing)) and it can't be
-// written because that would constitute creating a user.
+// Root implements fs.Node, fs.NodeStringLookuper, and HandleReadDirAller for
+// the root of the filesystem, which contains users.
 type Root struct{}
 
 func (Root) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = 0
-	// Root can't be read or written
-	a.Mode = os.ModeDir | 0o004
+	// Root can be read but not written
+	a.Mode = os.ModeDir | 0o044
 	return nil
 }
 
@@ -133,7 +132,7 @@ func (Root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		err := client.Get(fmt.Sprintf("user/following?%s", v.Encode()), &res)
 
 		if err != nil {
-			return []fuse.Dirent{}, err
+			return nil, err
 		}
 
 		if len(res) == 0 {
@@ -151,7 +150,8 @@ func (Root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	return e, nil
 }
 
-// User implements both Node and Handle for a user directory.
+// User implements fs.Node, fs.NodeStringLookuper, and HandleReadDirAller for
+// a user directory, which contains the user's repositories.
 type User struct {
 	// Login is the user's github username, which is unqiue.
 	Login string
@@ -188,7 +188,6 @@ func (u *User) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	return res, nil
 }
 
-// A user directory contains that user's repositories.
 func (u *User) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	var e []fuse.Dirent
 	v := url.Values{}
@@ -202,7 +201,7 @@ func (u *User) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 			url.PathEscape(u.Login), v.Encode()), &res)
 
 		if err != nil {
-			return []fuse.Dirent{}, err
+			return nil, err
 		}
 
 		if len(res) == 0 {
@@ -224,12 +223,15 @@ func (u *User) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	return e, nil
 }
 
-// Repo implements both Node and Handle for a repository directory.
+// Repo implements fs.Node, fs.NodeStringLookuper, and HandleReadDirAller for
+// a repository, which contains the entries at the root of that repository.
 type Repo struct {
-	// TODO: handle repo and user inode collisions
-
 	// Name is the repository's name.
 	Name string
+	// FullName contains the owner and repository name, separated by a slash.
+	FullName string `json:"full_name"`
+	// TODO: handle repo and user inode collisions
+
 	// Id is the repository's id. This is used as the inode.
 	Id uint64
 	// PushedAt is the time the repository was last pushed to. This is used as
@@ -250,4 +252,138 @@ func (r *Repo) Attr(ctx context.Context, a *fuse.Attr) error {
 	// TODO: set other equivalent information
 
 	return nil
+}
+
+func (r *Repo) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	return (&Dir{Path: "", repo: r}).Lookup(ctx, name)
+}
+
+func (r *Repo) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	return (&Dir{Path: "", repo: r}).ReadDirAll(ctx)
+}
+
+// Content is the response to a github api repo/.../contents/... request.
+type Content struct {
+	// Type is the type of content this represents.
+	Type string
+	// Path is the relative path to this content from the repository root.
+	Path string
+	// Path is the basename of this content's path.
+	Name string
+}
+
+func (c *Content) DirentType() fuse.DirentType {
+	// TODO: handle submodules (which show up as "file" in the current version
+	// of the api) and invalid types here
+	switch c.Type {
+	case "file":
+		return fuse.DT_File
+	case "dir":
+		return fuse.DT_Dir
+	case "symlink":
+		return fuse.DT_Link
+	default:
+		return fuse.DT_Unknown
+	}
+}
+
+// Dir implements fs.Node, fs.NodeStringLookuper, and HandleReadDirAller for
+// a directory within a repository, which contains the entries within that
+// directory.
+type Dir struct {
+	// Path is the relative path to this directory from the repository root.
+	Path string
+	// Repo is the repository that this directory belongs to.
+	repo *Repo
+}
+
+func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
+	// TODO: a.Inode =
+	// Dir can be read but not written
+	a.Mode = os.ModeDir | 0o044
+	// TODO: determine the times for this specific sub-directory
+	a.Mtime = d.repo.PushedAt
+	a.Ctime = d.repo.UpdatedAt
+
+	// TODO: set other equivalent information
+
+	return nil
+}
+
+func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	// TODO: handle empty d.Path here
+	path := fmt.Sprintf("%s/%s", d.Path, name)
+
+	var res interface{}
+	err := client.Get(fmt.Sprintf("repos/%s/contents/%s", d.repo.FullName,
+		path), &res)
+	if err != nil {
+		return nil, err
+	}
+
+	switch res.(type) {
+	// Denotes a directory
+	case []interface{}:
+		return &Dir{Path: path, repo: d.repo}, nil
+
+	// TODO: handle symlinks and submodules here
+	default:
+		// TODO: handle malformed responses here
+		res := res.(map[string]interface{})
+		content, err := base64.StdEncoding.DecodeString(res["content"].(string))
+		if err != nil {
+			return nil, err
+		}
+
+		return &File{Path: path, repo: d.repo, Content: content}, nil
+	}
+}
+
+func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	var res []*Content
+	err := client.Get(fmt.Sprintf("repos/%s/contents/%s", d.repo.FullName,
+		d.Path), &res)
+	if err != nil {
+		return nil, err
+	}
+
+	e := make([]fuse.Dirent, len(res))
+	for i, c := range res {
+		e[i] = fuse.Dirent{
+			// TODO: Inode:
+			Type: c.DirentType(),
+			Name: c.Name,
+		}
+	}
+
+	return e, nil
+}
+
+// File implements fs.Node and fs.HandleReadAller for a file within a
+// repository.
+type File struct {
+	// Path is the relative path to this file from the repository root.
+	Path string
+	// Repo is the repository that this file belongs to.
+	repo *Repo
+	// Content is the base64 encoded contents of this file.
+	Content []byte
+}
+
+func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
+	// TODO: a.Inode =
+	// File can be read but not written
+	a.Mode = 0o044
+	a.Size = uint64(len(f.Content))
+	// TODO: determine the times for this specific file
+	a.Mtime = f.repo.PushedAt
+	a.Ctime = f.repo.UpdatedAt
+
+	// TODO: set other equivalent information
+
+	return nil
+}
+
+func (f *File) ReadAll(ctx context.Context) ([]byte, error) {
+	return f.Content, nil
 }
