@@ -32,7 +32,13 @@
           vendorSha256 = "cZQFfZ8MOfW2Tzd5/Ju+JXJ0rbe56DBoUkvbYf6B0mo=";
         };
 
-        devShells.default = mkShell { packages = [ go_1_18 gopls gow ]; };
+        devShells = rec {
+          ci = mkShell { packages = [ go_1_18 ]; };
+
+          default = mkShell {
+            packages = ci.nativeBuildInputs ++ [ gopls gow ];
+          };
+        };
       }) // {
       overlays.default = (final: _: {
         gh-fs = self.packages.${final.system}.default;
