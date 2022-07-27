@@ -2,6 +2,8 @@
 
 All of GitHub, accessible as a userspace filesystem.
 
+This is a work in progress. Many types of content, including symlinks, submodules, large files, and binary files, are not accessible yet.
+
 ## Installation
 
 Currently only Linux and FreeBSD are supported, because those are the only platforms [the main dependency](https://github.com/bazil/fuse) supports.
@@ -24,3 +26,7 @@ ls mountpoint/mtoohey31
 kill %1 # stop gh-fs
 umount mountpoint # unmount the filesystem
 ```
+
+Please be aware that it is very easy to hit the rate limit of GitHub's API. Commands that access a lot of files/folders (i.e. recursively grepping your user directory) are likely to result in your API requests being rate limited.
+
+Also, note that when listing the root directory of the filesystem, only the authenticated user and those that they follow will be displayed. You can still access the repositories of other users by specifying the correct path.
