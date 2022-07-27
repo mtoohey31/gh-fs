@@ -2,14 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"errors"
 	"fmt"
 	"log"
-	"net/http"
-	"net/url"
 	"os"
-	"strconv"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,6 +15,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/cli/go-gh"
 	"github.com/cli/go-gh/pkg/api"
+	graphql "github.com/cli/shurcooL-graphql"
 )
 
 // TODO: allow write access to the authenticated user's directory? This could be
@@ -32,7 +29,7 @@ var cli struct {
 }
 
 // TODO: does this have to be refreshed?
-var client api.RESTClient
+var client api.GQLClient
 
 func main() {
 	kong.Parse(&cli)
@@ -41,7 +38,7 @@ func main() {
 
 	// TODO: investigate whether manually caching would be better, and how this
 	// caching actually works, cause it might not be doing what we want it to
-	client, err = gh.RESTClient(&api.ClientOptions{EnableCache: true})
+	client, err = gh.GQLClient(&api.ClientOptions{EnableCache: true})
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -83,67 +80,86 @@ func (Root) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (Root) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	var res *User
-	err := client.Get(fmt.Sprintf("users/%s", url.PathEscape(name)), &res)
+	var query struct {
+		User *User `graphql:"user(login: $login)"`
+	}
+	err := client.Query("LookupUser", &query,
+		map[string]interface{}{"login": graphql.String(name)})
 	if err != nil {
-		var apiErr api.HTTPError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			// User doesn't exist
-			return nil, syscall.ENOENT
-		}
-
-		// TODO: detect and return syscall error codes for other equivalent
-		// errors
-
+		log.Println(err)
 		return nil, err
 	}
 
-	if res == nil {
-		return nil, errors.New("TODO")
-	}
+	return query.User, nil
+}
 
-	return res, nil
+type followingQuery struct {
+	Edges []struct {
+		Node struct {
+			Login string
+		}
+	}
+	PageInfo struct {
+		EndCursor   string
+		HasNextPage bool
+	}
 }
 
 // Root conceptually contains all users, but we can't actually display that, so
 // instead we display the users followed by the authenticated user, and the
 // authenticated user themself. This means those will be the only visible
-// folders, but all other users can still be accessed via looking.
+// folders, but all other users can still be accessed via lookup.
 func (Root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	var res *User
-	err := client.Get("user", &res)
+	// TODO: include owners of repos the current user has starred too
+
+	var iq struct {
+		Viewer struct {
+			Login     string
+			Following followingQuery `graphql:"following(first: 100)"`
+		}
+	}
+	err := client.Query("GetViewerAndFollowing", &iq, nil)
 	if err != nil {
+		log.Println(err)
 		return nil, err
 	}
 
-	if res == nil {
-		return nil, errors.New("TODO")
+	e := make([]fuse.Dirent, len(iq.Viewer.Following.Edges)+1)
+	e[0] = fuse.Dirent{
+		// TODO: Inode: iq.Viewer.Id,
+		Type: fuse.DT_Dir,
+		Name: iq.Viewer.Login}
+	for i, f := range iq.Viewer.Following.Edges {
+		e[i+1] = fuse.Dirent{
+			// TODO: Inode: iq.Viewer.Id,
+			Type: fuse.DT_Dir,
+			Name: f.Node.Login}
 	}
 
-	// TODO: include owners of repos the current user has starred too
-	e := []fuse.Dirent{{Inode: res.Id, Type: fuse.DT_Dir, Name: res.Login}}
-	v := url.Values{}
-	v.Set("per_page", "100")
+	var sq struct {
+		Viewer struct {
+			Following followingQuery `graphql:"following(first: 100, after: $after)"`
+		}
+	}
 
-	for i := 1; true; i++ {
-		var res []*User
+	sq.Viewer.Following.PageInfo = iq.Viewer.Following.PageInfo
 
-		v.Set("page", strconv.Itoa(i))
-		err := client.Get(fmt.Sprintf("user/following?%s", v.Encode()), &res)
+	for sq.Viewer.Following.PageInfo.HasNextPage {
+		err := client.Query("GetFollowing", &sq, map[string]interface{}{
+			"after": sq.Viewer.Following.PageInfo.EndCursor})
 
 		if err != nil {
+			log.Println(err)
 			return nil, err
 		}
 
-		if len(res) == 0 {
-			break
+		ne := make([]fuse.Dirent, len(sq.Viewer.Following.Edges))
+		for i, f := range sq.Viewer.Following.Edges {
+			ne[i] = fuse.Dirent{
+				// TODO: Inode: f.Node.Id,
+				Type: fuse.DT_Dir,
+				Name: f.Node.Login}
 		}
-
-		ne := make([]fuse.Dirent, len(res))
-		for i, u := range res {
-			ne[i] = fuse.Dirent{Inode: u.Id, Type: fuse.DT_Dir, Name: u.Login}
-		}
-
 		e = append(e, ne...)
 	}
 
@@ -155,12 +171,10 @@ func (Root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 type User struct {
 	// Login is the user's github username, which is unqiue.
 	Login string
-	// Id is the user's unique github account id. This is used as the inode.
-	Id uint64
 }
 
 func (u *User) Attr(ctx context.Context, a *fuse.Attr) error {
-	a.Inode = u.Id
+	// TODO: a.Inode =
 	// User can be read but not written
 	a.Mode = os.ModeDir | 0o044
 
@@ -170,53 +184,79 @@ func (u *User) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (u *User) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	var res *Repo
-	err := client.Get(fmt.Sprintf("repos/%s/%s", url.PathEscape(u.Login),
-		url.PathEscape(name)), &res)
+	var query struct {
+		Repository *Repo `graphql:"repository(owner: $owner, name: $name)"`
+	}
+	err := client.Query("LookupRepo", &query, map[string]interface{}{
+		"owner": graphql.String(u.Login), "name": graphql.String(name)})
 	if err != nil {
-		var apiErr api.HTTPError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			// Repo doesn't exist
-			return nil, syscall.ENOENT
+		log.Println(err)
+		return nil, err
+	}
+
+	return query.Repository, nil
+}
+
+type repositoriesQuery struct {
+	Edges []struct {
+		Node struct {
+			Name string
 		}
 	}
-
-	if res == nil {
-		return nil, errors.New("TODO")
+	PageInfo struct {
+		EndCursor   string
+		HasNextPage bool
 	}
-
-	return res, nil
 }
 
 func (u *User) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	var e []fuse.Dirent
-	v := url.Values{}
-	v.Set("per_page", "100")
+	var iq struct {
+		User struct {
+			Repositories repositoriesQuery `graphql:"repositories(ownerAffiliations: OWNER, first: 100)"`
+		} `graphql:"user(login: $login)"`
+	}
+	err := client.Query("GetUserRepositories", &iq, map[string]interface{}{
+		"login": graphql.String(u.Login)})
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
 
-	for i := 1; true; i++ {
-		var res []*Repo
+	e := make([]fuse.Dirent, len(iq.User.Repositories.Edges))
+	for i, r := range iq.User.Repositories.Edges {
+		e[i] = fuse.Dirent{
+			// TODO: Inode: r.Node.Id,
+			Type: fuse.DT_Dir,
+			Name: r.Node.Name,
+		}
+	}
 
-		v.Set("page", strconv.Itoa(i))
-		err := client.Get(fmt.Sprintf("users/%s/repos?%s",
-			url.PathEscape(u.Login), v.Encode()), &res)
+	var sq struct {
+		User struct {
+			Repositories repositoriesQuery `graphql:"repositories(ownerAffiliations: OWNER, first: 100, after: $after)"`
+		} `graphql:"user(login: $login)"`
+	}
+	sq.User.Repositories = iq.User.Repositories
 
+	for sq.User.Repositories.PageInfo.HasNextPage {
+		err := client.Query("GetUserRepositories", &sq,
+			map[string]interface{}{
+				"after": graphql.String(sq.User.Repositories.PageInfo.EndCursor),
+				"login": graphql.String(u.Login),
+			})
 		if err != nil {
+			log.Println(err)
 			return nil, err
 		}
 
-		if len(res) == 0 {
-			break
-		}
-
-		ne := make([]fuse.Dirent, len(res))
-		for i, r := range res {
+		ne := make([]fuse.Dirent, len(sq.User.Repositories.Edges))
+		for i, r := range sq.User.Repositories.Edges {
 			ne[i] = fuse.Dirent{
-				Inode: r.Id,
-				Type:  fuse.DT_Dir,
-				Name:  r.Name,
+				// TODO: Inode: r.Node.Id,
+				Type: fuse.DT_Dir,
+				Name: r.Node.Name,
 			}
 		}
-
 		e = append(e, ne...)
 	}
 
@@ -228,22 +268,23 @@ func (u *User) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 type Repo struct {
 	// Name is the repository's name.
 	Name string
-	// FullName contains the owner and repository name, separated by a slash.
-	FullName string `json:"full_name"`
+	// Owner is the owner of this repository.
+	Owner struct{ Login string }
 	// TODO: handle repo and user inode collisions
 
-	// Id is the repository's id. This is used as the inode.
-	Id uint64
 	// PushedAt is the time the repository was last pushed to. This is used as
 	// the mtime.
-	PushedAt time.Time `json:"pushed_at"`
+	PushedAt time.Time
 	// UpdatedAt is the time the repository was last updated. This is used as
 	// the ctime.
-	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedAt time.Time
+
+	// DefaultBranchRef is the mainb ranch for this repository.
+	DefaultBranchRef struct{ Name string }
 }
 
 func (r *Repo) Attr(ctx context.Context, a *fuse.Attr) error {
-	a.Inode = r.Id
+	// TODO: a.Inode = r.Id
 	// Repo can be read but not written
 	a.Mode = os.ModeDir | 0o044
 	a.Mtime = r.PushedAt
@@ -311,51 +352,82 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	// TODO: handle empty d.Path here
-	path := fmt.Sprintf("%s/%s", d.Path, name)
-
-	var res interface{}
-	err := client.Get(fmt.Sprintf("repos/%s/contents/%s", d.repo.FullName,
-		path), &res)
+	path := filepath.Join(d.Path, name)
+	// TODO: figure out how to differentiate between Tree and Blob without
+	// asking for extraneous data
+	var query struct {
+		Repository struct {
+			Object struct {
+				Tree struct {
+					AbbreviatedOid string
+				} `graphql:"... on Tree"`
+				Blob struct {
+					Oid string
+				} `graphql:"... on Blob"`
+			} `graphql:"object(expression: $expression)"`
+		} `graphql:"repository(name: $name, owner: $owner)"`
+	}
+	err := client.Query("StatDirEntry", &query, map[string]interface{}{
+		"name":  graphql.String(d.repo.Name),
+		"owner": graphql.String(d.repo.Owner.Login),
+		"expression": graphql.String(fmt.Sprintf("%s:%s",
+			d.repo.DefaultBranchRef.Name, path)),
+	})
 	if err != nil {
+		log.Println(err)
 		return nil, err
 	}
 
-	switch res.(type) {
-	// Denotes a directory
-	case []interface{}:
+	if query.Repository.Object.Tree.AbbreviatedOid != "" {
 		return &Dir{Path: path, repo: d.repo}, nil
-
-	// TODO: handle symlinks and submodules here
-	default:
-		// TODO: handle malformed responses here
-		res := res.(map[string]interface{})
-		content, err := base64.StdEncoding.DecodeString(res["content"].(string))
-		if err != nil {
-			return nil, err
-		}
-
-		return &File{Path: path, repo: d.repo, Content: content}, nil
+	} else if query.Repository.Object.Blob.Oid != "" {
+		return &File{Path: path, repo: d.repo}, nil
+	} else {
+		return nil, syscall.ENOENT
 	}
 }
 
 func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	var res []*Content
-	err := client.Get(fmt.Sprintf("repos/%s/contents/%s", d.repo.FullName,
-		d.Path), &res)
+	var query struct {
+		Repository struct {
+			Object struct {
+				Tree struct {
+					Entries []struct {
+						Name string
+						Type string
+					}
+				} `graphql:"... on Tree"`
+			} `graphql:"object(expression: $expression)"`
+		} `graphql:"repository(name: $name, owner: $owner)"`
+	}
+	err := client.Query("ListDir", &query, map[string]interface{}{
+		"name":  graphql.String(d.repo.Name),
+		"owner": graphql.String(d.repo.Owner.Login),
+		"expression": graphql.String(fmt.Sprintf("%s:%s",
+			d.repo.DefaultBranchRef.Name, d.Path)),
+	})
 	if err != nil {
+		log.Println(err)
 		return nil, err
 	}
 
-	e := make([]fuse.Dirent, len(res))
-	for i, c := range res {
+	e := make([]fuse.Dirent, len(query.Repository.Object.Tree.Entries))
+	for i, entry := range query.Repository.Object.Tree.Entries {
+		// TODO: figure out symlinks and submodules here
+		var t fuse.DirentType
+		switch entry.Type {
+		case "blob":
+			t = fuse.DT_File
+		case "tree":
+			t = fuse.DT_Dir
+		}
+
 		e[i] = fuse.Dirent{
-			// TODO: Inode:
-			Type: c.DirentType(),
-			Name: c.Name,
+			// TODO: Inode: 0,
+			Type: t,
+			Name: entry.Name,
 		}
 	}
-
 	return e, nil
 }
 
@@ -366,15 +438,35 @@ type File struct {
 	Path string
 	// Repo is the repository that this file belongs to.
 	repo *Repo
-	// Content is the base64 encoded contents of this file.
-	Content []byte
 }
 
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
+	var query struct {
+		Repository struct {
+			Object struct {
+				Blob struct {
+					ByteSize int
+				} `graphql:"... on Blob"`
+			} `graphql:"object(expression: $expression)"`
+		} `graphql:"repository(name: $name, owner: $owner)"`
+	}
+	err := client.Query("GetFileByteSize", &query, map[string]interface{}{
+		"name":  graphql.String(f.repo.Name),
+		"owner": graphql.String(f.repo.Owner.Login),
+		"expression": graphql.String(fmt.Sprintf("%s:%s",
+			f.repo.DefaultBranchRef.Name, f.Path)),
+	})
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+	log.Println(f)
+	log.Println(query)
+
 	// TODO: a.Inode =
 	// File can be read but not written
 	a.Mode = 0o044
-	a.Size = uint64(len(f.Content))
+	a.Size = uint64(query.Repository.Object.Blob.ByteSize)
 	// TODO: determine the times for this specific file
 	a.Mtime = f.repo.PushedAt
 	a.Ctime = f.repo.UpdatedAt
@@ -385,5 +477,26 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (f *File) ReadAll(ctx context.Context) ([]byte, error) {
-	return f.Content, nil
+	// TODO: handle binary and truncated files
+	var query struct {
+		Repository struct {
+			Object struct {
+				Blob struct {
+					Text string
+				} `graphql:"... on Blob"`
+			} `graphql:"object(expression: $expression)"`
+		} `graphql:"repository(name: $name, owner: $owner)"`
+	}
+	err := client.Query("GetFileContents", &query, map[string]interface{}{
+		"name":  graphql.String(f.repo.Name),
+		"owner": graphql.String(f.repo.Owner.Login),
+		"expression": graphql.String(fmt.Sprintf("%s:%s",
+			f.repo.DefaultBranchRef.Name, f.Path)),
+	})
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+
+	return []byte(query.Repository.Object.Blob.Text), nil
 }
