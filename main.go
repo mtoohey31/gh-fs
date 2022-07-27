@@ -169,7 +169,7 @@ func (Root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 // User implements fs.Node, fs.NodeStringLookuper, and HandleReadDirAller for
 // a user directory, which contains the user's repositories.
 type User struct {
-	// Login is the user's github username, which is unqiue.
+	// Login is the user's github username, which is unique.
 	Login string
 }
 
@@ -279,7 +279,7 @@ type Repo struct {
 	// the ctime.
 	UpdatedAt time.Time
 
-	// DefaultBranchRef is the mainb ranch for this repository.
+	// DefaultBranchRef is the main branch for this repository.
 	DefaultBranchRef struct{ Name string }
 }
 
