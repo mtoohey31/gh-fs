@@ -29,7 +29,7 @@
           name = "gh-fs";
           pname = name;
           src = ./.;
-          vendorSha256 = "cZQFfZ8MOfW2Tzd5/Ju+JXJ0rbe56DBoUkvbYf6B0mo=";
+          vendorSha256 = "lefI6Zriya9+UpUvheUAjzXkSBLQ3MiLyYm4yAS3bXY=";
         };
 
         devShells = rec {
