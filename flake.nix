@@ -25,15 +25,15 @@
             })
           ]; inherit system;
         }; rec {
-        packages.default = buildGo118Module rec {
+        packages.default = buildGoModule rec {
           name = "gh-fs";
           pname = name;
           src = ./.;
-          vendorSha256 = "lefI6Zriya9+UpUvheUAjzXkSBLQ3MiLyYm4yAS3bXY=";
+          vendorSha256 = "4vrwXJo3rVC9jmSYB5R5q5Trf9NaBjFe5hkrbbpy/yU=";
         };
 
         devShells = rec {
-          ci = mkShell { packages = [ go_1_18 ]; };
+          ci = mkShell { packages = [ go ]; };
 
           default = mkShell {
             packages = ci.nativeBuildInputs ++ [ gopls gow ];

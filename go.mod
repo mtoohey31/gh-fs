@@ -1,9 +1,9 @@
 module mtoohey.com/gh-fs
 
-go 1.18
+go 1.19
 
 require (
-	bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5
+	bazil.org/fuse v0.0.0-20221209211307-2abb8038c751
 	github.com/alecthomas/kong v0.7.1
 	github.com/cli/go-gh v1.2.1
 	github.com/cli/shurcooL-graphql v0.0.3

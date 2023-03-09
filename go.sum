@@ -1,5 +1,7 @@
 bazil.org/fuse v0.0.0-20200524192727-fb710f7dfd05 h1:UrYe9YkT4Wpm6D+zByEyCJQzDqTPXqTDUI7bZ41i9VE=
 bazil.org/fuse v0.0.0-20200524192727-fb710f7dfd05/go.mod h1:h0h5FBYpXThbvSfTqthw+0I4nmHnhTHkO5BoOHsBWqg=
+bazil.org/fuse v0.0.0-20221209211307-2abb8038c751 h1:WDXfyDLJ+tg8PYC6yIkOmc/RWFrqMgxk1rLpRrlR8Ng=
+bazil.org/fuse v0.0.0-20221209211307-2abb8038c751/go.mod h1:eX+feLR06AMFrTGQBzFnMMDz1vjBv2yHZBFlI9RJeaQ=
 bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5 h1:A0NsYy4lDBZAC6QiYeJ4N+XuHIKBpyhAVRMHRQZKTeQ=
 bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5/go.mod h1:gG3RZAMXCa/OTes6rr9EwusmR1OH1tDDy+cg9c5YliY=
 github.com/Julusian/godocdown v0.0.0-20170816220326-6d19f8ff2df8/go.mod h1:INZr5t32rG59/5xeltqoCJoNY7e5x/3xoY9WSWVWg74=
