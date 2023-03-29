@@ -26,10 +26,10 @@ release: $(RELEASE_FILES)
 ci: gh-fs fmt-check
 
 fmt:
-	gofmt -w .
+	go fmt ./...
 
 fmt-check:
-	test -z "$$(gofmt -l .)"
+	test -z "$$(gofmt -l $$(find . -name vendor -prune -false -o -name '*.go'))"
 
 clean:
 	rm -rf dist gh-fs result
